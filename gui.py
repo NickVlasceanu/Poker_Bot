@@ -7,13 +7,18 @@ Run:  python gui.py
 """
 
 import queue
+import random
 import threading
 import tkinter as tk
 from tkinter import font as tkfont
 
+import coach
 from utils import (
     advise, deal_hand, showdown_winner, hand_class, card_to_str,
 )
+
+# Opponent bet size each street, as a fraction of the pot (drives pot odds).
+BET_SIZES = [0.33, 0.5, 0.75]
 
 # --- palette ---------------------------------------------------------------
 FELT = "#0b6623"
@@ -48,6 +53,7 @@ class PokerTable:
         self.canvas.pack(padx=12, pady=(12, 6))
 
         self._build_controls()
+        self._build_coach_panel()
 
         self.rank_font = tkfont.Font(family="Segoe UI", size=14, weight="bold")
         self.suit_font = tkfont.Font(family="Segoe UI", size=26)
@@ -80,6 +86,32 @@ class PokerTable:
         tk.Spinbox(bar, from_=1, to=6, width=3, textvariable=self.opp_var,
                    command=self.new_hand).pack(side="left")
 
+    def _build_coach_panel(self):
+        """Scrollable read-only text area that explains each decision."""
+        frame = tk.Frame(self.root, bg=FELT_DARK)
+        frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        tk.Label(frame, text="COACH — why this play", bg=FELT_DARK, fg=GOLD,
+                 anchor="w").pack(fill="x")
+        body = tk.Frame(frame, bg=FELT_DARK)
+        body.pack(fill="both", expand=True)
+
+        self.coach_text = tk.Text(body, height=16, width=104, wrap="word",
+                                  bg="#10241a", fg="#e6efe6",
+                                  font=("Consolas", 10), relief="flat",
+                                  padx=12, pady=8)
+        sb = tk.Scrollbar(body, command=self.coach_text.yview)
+        self.coach_text.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.coach_text.pack(side="left", fill="both", expand=True)
+        self.coach_text.configure(state="disabled")
+
+    def set_coach(self, text):
+        self.coach_text.configure(state="normal")
+        self.coach_text.delete("1.0", "end")
+        self.coach_text.insert("1.0", text)
+        self.coach_text.configure(state="disabled")
+
     # -- game flow ---------------------------------------------------------
     def new_hand(self):
         self.num_opponents = self.opp_var.get()
@@ -87,7 +119,8 @@ class PokerTable:
         self.hero_str = [card_to_str(c) for c in self.hero]
         self.board_str = [card_to_str(c) for c in self.full_board]
         self.street_idx = 0
-        self.pot = 20 * (self.num_opponents + 1)
+        self.pot = 20 * (self.num_opponents + 1)  # antes
+        self.to_call = 0                          # pre-flop: no bet faced
         self.revealed = False
         self.next_btn.config(text="Next Street ▶", state="normal")
         self.render()
@@ -95,8 +128,11 @@ class PokerTable:
 
     def next_street(self):
         if self.street_idx < len(STREETS) - 1:
+            self.pot += self.to_call            # you call the bet you faced
             self.street_idx += 1
-            self.pot += 40 * (self.num_opponents + 1)
+            # an opponent bets into the new street
+            self.to_call = max(20, round(self.pot * random.choice(BET_SIZES)))
+            self.pot += self.to_call
             if self.street_idx == len(STREETS) - 1:
                 self.next_btn.config(text="Showdown ♠")
             self.render()
@@ -105,16 +141,27 @@ class PokerTable:
             self.showdown()
 
     def showdown(self):
+        self.pot += self.to_call                # call the river bet
+        self.to_call = 0
         self.revealed = True
         self.next_btn.config(state="disabled")
         result, seat = showdown_winner(self.hero, self.opponents, self.full_board)
         hero_cls = hand_class(self.hero, self.full_board)
         if result == "hero":
             msg, color = f"YOU WIN {self.pot} chips!  ({hero_cls})", GOLD
+            verdict = (f"Result: you win {self.pot} with {hero_cls}. When your "
+                       "equity beat the price all the way down, getting chips in "
+                       "was the profitable line — this is what it pays off into.")
         elif result == "tie":
             msg, color = f"SPLIT POT with Seat {seat + 1}  ({hero_cls})", YELLOW_BAR
+            verdict = (f"Result: split pot with Seat {seat + 1} ({hero_cls}). "
+                       "Chopped pots still bank your share of the dead money.")
         else:
             msg, color = f"Seat {seat + 1} wins.  You had {hero_cls}.", RED
+            verdict = (f"Result: Seat {seat + 1} wins; you had {hero_cls}. Losing a "
+                       "hand doesn't mean a call was wrong — judge the decision by "
+                       "whether your equity beat the price, not by one outcome.")
+        self.set_coach(verdict)
         self.render(banner=(msg, color))
 
     # -- equity (off the UI thread so the window stays responsive) ----------
@@ -122,6 +169,7 @@ class PokerTable:
         n = STREETS[self.street_idx][1]
         shown = self.board_str[:n]
         self.canvas.itemconfigure("equity_text", text="Calculating equity...")
+        self.set_coach("Calculating equity and pot odds...")
 
         self._equity_token += 1
         token = self._equity_token
@@ -196,6 +244,10 @@ class PokerTable:
                                 font=self.big_font)
         self.canvas.create_text(820, 22, text=f"Pot: {self.pot}", fill=GOLD,
                                 font=self.label_font)
+        if self.to_call and not self.revealed:
+            self.canvas.create_text(820, 42,
+                                    text=f"To call: {self.to_call}", fill=RED_BAR,
+                                    font=self.label_font)
 
         # opponents
         self.canvas.create_text(120, 60, text=f"Opponents ({self.num_opponents})",
@@ -249,6 +301,12 @@ class PokerTable:
             "rec_text",
             text=f"➔ {eq['recommendation']}   "
                  f"(fair share {eq['fair_share']:.0%})")
+
+        # full teaching breakdown in the side panel
+        n = STREETS[self.street_idx][1]
+        self.set_coach(coach.coach(eq, self.to_call, self.pot,
+                                   self.board_str[:n], self.hero_str,
+                                   self.num_opponents))
 
 
 def main():

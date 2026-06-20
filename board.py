@@ -135,7 +135,11 @@ def render_table(state):
         out.append("\n".join(merged))
 
     out.append("")
-    out.append(f"{YELLOW}Community board:{RESET}   {YELLOW}Pot: {state['pot']} chips{RESET}")
+    potline = f"{YELLOW}Pot: {state['pot']} chips{RESET}"
+    to_call = state.get("to_call")
+    if to_call:
+        potline += f"   {RED}Opponent bets {to_call} — {to_call} to call{RESET}"
+    out.append(f"{YELLOW}Community board:{RESET}   {potline}")
     out.append(render_row(state["board"], pad_to=5))
 
     out.append("")
