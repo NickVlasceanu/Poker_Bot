@@ -43,6 +43,21 @@ def call_ev(equity, to_call, pot):
     return equity * pot - (1 - equity) * to_call
 
 
+def implied_odds(equity, to_call, pot):
+    """Extra chips you must win on later streets to justify a -EV call now.
+
+    A draw can be worth calling even when direct odds say no, IF you'll win
+    enough more when you hit. Break-even requires:
+        equity * (pot + X) = (1 - equity) * to_call
+    Solving for the extra future winnings X:
+        X = (1 - equity)/equity * to_call - pot
+    Returns X (chips). Positive means you need that much more to call profitably.
+    """
+    if equity <= 0:
+        return float("inf")
+    return (1 - equity) / equity * to_call - pot
+
+
 # --------------------------------------------------------------------------
 # Outs & the rule of 4 and 2
 # --------------------------------------------------------------------------
@@ -106,12 +121,14 @@ def rule_of_4_and_2(outs, cards_to_come):
 # --------------------------------------------------------------------------
 # The full explanation
 # --------------------------------------------------------------------------
-def coach(eq, to_call, pot, board, hole, num_opponents):
+def coach(eq, to_call, pot, board, hole, num_opponents, behind=0):
     """Build the multi-line teaching text for one decision point.
 
     eq: dict from utils.advise (win/tie/equity/fair_share).
     to_call: chips you must put in to continue (0 = checked to you).
     pot: chips in the middle, including any bet you're facing.
+    behind: chips still behind that you could win on later streets (for
+            implied-odds reasoning). 0 disables the realism check.
     """
     e = eq["equity"]
     fair = eq["fair_share"]
@@ -182,17 +199,40 @@ def coach(eq, to_call, pot, board, hole, num_opponents):
         lines.append(f"  (The full sim says {e:.0%}; the gap is made hands and "
                      "overcards the shortcut ignores.)")
 
+    # ---- implied odds ---------------------------------------------------
+    implied_ok = False
+    if to_call > 0 and total_outs > 0 and cards_to_come >= 1:
+        required = pot_odds(to_call, pot)[0]
+        if e < required:                       # direct odds say fold
+            extra = implied_odds(e, to_call, pot)
+            section("IMPLIED ODDS — the draw's hidden value")
+            lines.append(f"  Direct odds say fold ({e:.0%} < {required:.0%}), but a "
+                         "draw can still pay if you get paid off when it lands.")
+            lines.append(f"  You'd need to win about {extra:.0f} MORE chips on later "
+                         "streets to make calling break even.")
+            if behind > 0:
+                if extra <= behind:
+                    implied_ok = True
+                    lines.append(f"  Opponents have ~{behind} behind — winning "
+                                 f"{extra:.0f} extra is realistic, so the draw is "
+                                 "worth a call on implied odds.")
+                else:
+                    lines.append(f"  Only ~{behind} is left to win — short of the "
+                                 f"{extra:.0f} you'd need, so the price isn't there.")
+            lines.append("  Rule: chase a draw when the chips you'll win AFTER "
+                         "hitting cover the gap in your direct odds.")
+
     # ---- the decision ---------------------------------------------------
     section("DECISION  ->  " + _verdict_headline(e, fair, to_call, pot, total_outs,
-                                                  cards_to_come))
+                                                  cards_to_come, implied_ok))
     for reason in _verdict_reasons(e, fair, to_call, pot, total_outs,
-                                    cards_to_come):
+                                    cards_to_come, implied_ok):
         lines.append("  " + reason)
 
     return "\n".join(lines).strip("\n")
 
 
-def _verdict_headline(e, fair, to_call, pot, outs, cards_to_come):
+def _verdict_headline(e, fair, to_call, pot, outs, cards_to_come, implied_ok=False):
     required = pot_odds(to_call, pot)[0] if to_call > 0 else 0
     strong_draw = outs >= 8 and cards_to_come >= 1
 
@@ -204,18 +244,22 @@ def _verdict_headline(e, fair, to_call, pot, outs, cards_to_come):
         return "CHECK"
 
     margin = e - required
-    if margin <= -0.06 and not strong_draw:
-        return "FOLD"
     if e > 0.58 and margin > 0.12:
         return "RAISE FOR VALUE"
     if strong_draw and margin > -0.02:
         return "RAISE (SEMI-BLUFF) or CALL"
-    if margin <= 0 and strong_draw:
+    if margin >= 0:
+        return "CALL"
+    if implied_ok:
+        return "CALL (IMPLIED ODDS)"
+    if margin <= -0.06 and not strong_draw:
+        return "FOLD"
+    if strong_draw:
         return "CALL (DRAWING)"
-    return "CALL"
+    return "FOLD"
 
 
-def _verdict_reasons(e, fair, to_call, pot, outs, cards_to_come):
+def _verdict_reasons(e, fair, to_call, pot, outs, cards_to_come, implied_ok=False):
     required = pot_odds(to_call, pot)[0] if to_call > 0 else 0
     strong_draw = outs >= 8 and cards_to_come >= 1
     reasons = []
@@ -237,11 +281,7 @@ def _verdict_reasons(e, fair, to_call, pot, outs, cards_to_come):
         return reasons
 
     margin = e - required
-    if margin <= -0.06 and not strong_draw:
-        reasons.append(f"Why: you need {required:.0%} to call but only have "
-                       f"{e:.0%} — that's a losing price with no draw to save it. "
-                       "Paying off here bleeds chips over time.")
-    elif e > 0.58 and margin > 0.12:
+    if e > 0.58 and margin > 0.12:
         reasons.append(f"Why: {e:.0%} equity crushes the {required:.0%} price. "
                        "Just calling lets opponents off cheap — raise to charge "
                        "draws and build the pot while you're a big favorite.")
@@ -249,14 +289,22 @@ def _verdict_reasons(e, fair, to_call, pot, outs, cards_to_come):
         reasons.append(f"Why: with {outs} outs you're rarely far behind, and a "
                        "raise adds fold equity — opponents may fold, and you still "
                        "improve often when they don't.")
-    elif margin <= 0 and strong_draw:
-        reasons.append(f"Why: pure odds are a hair short ({e:.0%} vs "
-                       f"{required:.0%}), but a {outs}-out draw has implied odds — "
-                       "the chips you'll win when you hit make the call worthwhile.")
-    else:
+    elif margin >= 0:
         reasons.append(f"Why: {e:.0%} clears the {required:.0%} you need, so the "
                        "call is +EV. Not strong enough to raise for value, but "
                        "folding would surrender a profitable spot.")
+    elif implied_ok:
+        reasons.append(f"Why: direct odds are short ({e:.0%} vs {required:.0%}), but "
+                       f"the {outs}-out draw's implied odds cover the gap — you'll "
+                       "win enough extra when it hits to make calling pay.")
+    elif strong_draw:
+        reasons.append(f"Why: you're behind the {required:.0%} price, but {outs} outs "
+                       "is a real draw — a cheap call is fine; fold to heavy "
+                       "pressure when the implied odds aren't there.")
+    else:
+        reasons.append(f"Why: you need {required:.0%} to call but only have "
+                       f"{e:.0%} — that's a losing price with no draw to save it. "
+                       "Paying off here bleeds chips over time.")
 
     reasons.append(f"Rule of thumb: call when equity ({e:.0%}) > pot-odds price "
                    f"({required:.0%}); raise when you're a clear favorite or have "

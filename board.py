@@ -1,7 +1,7 @@
-"""Visual rendering for the poker game.
+"""ASCII card rendering and ANSI colors for the terminal game.
 
-Draws actual ASCII playing cards and a table layout so a simulated hand
-looks like a game being dealt instead of a wall of printed numbers.
+Provides the playing-card art and color constants used by the terminal UI
+(main.py). The interactive table layout itself lives in main.py.
 """
 
 # --- ANSI colors -----------------------------------------------------------
@@ -88,77 +88,3 @@ def render_row(cards, hidden=False, pad_to=None):
     for row in range(5):
         lines.append(" ".join(block[row] for block in rendered))
     return "\n".join(lines)
-
-
-def _equity_bar(eq, width=24):
-    """A colored progress bar for a 0..1 equity value."""
-    filled = int(round(eq * width))
-    color = GREEN if eq >= 0.5 else YELLOW if eq >= 0.3 else RED
-    bar = "█" * filled + DIM + "░" * (width - filled) + RESET
-    return f"{color}{bar}{RESET}"
-
-
-def render_table(state):
-    """Render the full table for one moment of a hand.
-
-    state keys:
-      street      -- "Pre-flop" / "Flop" / "Turn" / "River" / "Showdown"
-      board       -- list of community card strings dealt so far
-      hero        -- list of hero's 2 hole cards
-      opponents   -- int, number of opponents
-      pot         -- int chip count
-      reveal_opps -- optional list of opponent hole-card pairs to show
-      equity      -- optional dict from utils.advise()
-    """
-    out = []
-    line = "═" * 52
-    out.append(f"{GREEN}╔{line}╗{RESET}")
-
-    title = f" {state['street'].upper()} ".center(52, " ")
-    out.append(f"{GREEN}║{RESET}{BOLD}{title}{RESET}{GREEN}║{RESET}")
-    out.append(f"{GREEN}╚{line}╝{RESET}")
-
-    # Opponents (face down, or revealed at showdown)
-    reveal = state.get("reveal_opps")
-    out.append(f"{DIM}Opponents ({state['opponents']}):{RESET}")
-    if reveal:
-        for i, opp in enumerate(reveal, 1):
-            out.append(f"  {DIM}Seat {i}{RESET}")
-            out.append(render_row(opp))
-    else:
-        # one face-down pair per opponent, laid out side by side with a gap
-        opp_backs = [render_row(["", ""], hidden=True)
-                     for _ in range(state["opponents"])]
-        merged = []
-        for row in range(5):
-            merged.append("    ".join(h.split("\n")[row] for h in opp_backs))
-        out.append("\n".join(merged))
-
-    out.append("")
-    potline = f"{YELLOW}Pot: {state['pot']} chips{RESET}"
-    to_call = state.get("to_call")
-    if to_call:
-        seat = state.get("bettor_seat")
-        who = f"Seat {seat + 1}" if seat is not None else "Opponent"
-        potline += f"   {RED}{who} bets {to_call} — {to_call} to call{RESET}"
-    out.append(f"{YELLOW}Community board:{RESET}   {potline}")
-    out.append(render_row(state["board"], pad_to=5))
-
-    out.append("")
-    out.append(f"{BOLD}Your hand:{RESET}")
-    out.append(render_row(state["hero"]))
-
-    eq = state.get("equity")
-    if eq:
-        out.append("")
-        out.append(
-            f"  Win {GREEN}{eq['win']:.0%}{RESET}  "
-            f"Tie {DIM}{eq['tie']:.0%}{RESET}  "
-            f"Equity {BOLD}{eq['equity']:.0%}{RESET}"
-        )
-        out.append(f"  {_equity_bar(eq['equity'])} {eq['equity']:.0%}")
-        out.append(f"  {DIM}Fair share vs {state['opponents']} opp: "
-                   f"{eq['fair_share']:.0%}{RESET}")
-        out.append(f"  ➜ {BOLD}{eq['recommendation']}{RESET}")
-
-    return "\n".join(out)

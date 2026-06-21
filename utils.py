@@ -21,34 +21,6 @@ def card_to_str(card_int):
     return Card.int_to_str(card_int)
 
 
-def deal_hand(num_opponents):
-    """Shuffle and deal a hero hand, opponent hands, and a full board.
-
-    Returns (hero, opponents, full_board) as lists of treys card ints.
-    """
-    deck = Deck()
-    hero = deck.draw(2)
-    opponents = [deck.draw(2) for _ in range(num_opponents)]
-    full_board = deck.draw(5)
-    return hero, opponents, full_board
-
-
-def showdown_winner(hero, opponents, board_ints):
-    """Decide a showdown.
-
-    Returns ('hero'|'opponents'|'tie', best_opponent_seat_index).
-    """
-    hero_score = evaluator.evaluate(board_ints, hero)
-    opp_scores = [evaluator.evaluate(board_ints, oh) for oh in opponents]
-    best_opp = min(opp_scores)
-    seat = opp_scores.index(best_opp)
-    if hero_score < best_opp:
-        return "hero", seat
-    if hero_score > best_opp:
-        return "opponents", seat
-    return "tie", seat
-
-
 def hand_class(cards, board_ints):
     """Human-readable hand class, e.g. 'Three of a Kind'."""
     rank = evaluator.evaluate(board_ints, cards)

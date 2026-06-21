@@ -1,73 +1,94 @@
-"""Equity-driven opponents.
+"""Equity-driven opponent AI for the full game.
 
-Each opponent looks at its OWN hole cards and acts on the same logic the coach
-applies to the hero: bet/raise when equity beats its fair share, check or bluff
-when weak. This replaces the old random bet, so a bet size now actually means
-something -- a big bet genuinely represents a strong range, with a disciplined
-share of bluffs mixed in.
+Given the live game state, an opponent decides fold / check / call / bet / raise
+using the same numbers the coach teaches the hero: its own equity, its fair
+share of the pot, the pot odds it's being offered, and how many outs it has.
+A disciplined slice of weak hands bluff (and strong draws semi-bluff) so the
+bet sizes carry real information.
 """
 
 import random as _random
 
-from utils import advise
+import coach
+from utils import advise, card_to_str
 
-# Bet sizes as a fraction of the current pot.
-VALUE_SIZE = 0.75   # strong hands bet big
-THIN_SIZE = 0.50    # decent hands bet smaller
-BLUFF_SIZE = 0.75   # bluffs copy the value size so they're indistinguishable
+# Bet/raise sizing as a fraction of the pot.
+VALUE_SIZE = 0.70
+THIN_SIZE = 0.45
+BLUFF_SIZE = 0.70
+RAISE_SIZE = 1.0     # raises add about one pot on top of the call
 
-# How often a weak hand turns into a bluff instead of giving up.
-# Anchored to balance: against a ~pot-sized bet a caller's break-even equity --
-# and therefore the share of bluffs that keeps them indifferent -- is about 1/3,
-# i.e. roughly one bluff for every two value bets. We approximate that target
-# mix with this fixed rate; it's the one knob tuned by judgment.
-BLUFF_FREQ = 0.30
+# Frequencies (the judgement knobs). ~1 bluff per 2 value bets keeps a
+# pot-ish bet roughly balanced; semi-bluffs add a few more aggressive lines.
+BLUFF_FREQ = 0.28
+SEMI_BLUFF_FREQ = 0.45
+VALUE_RAISE_FREQ = 0.6
 
 
-def decide(hole, board, num_opponents, pot, iterations=300, rng=_random):
-    """One opponent's action for the current street.
+def choose(game, idx, iterations=200, rng=_random):
+    """Return (action, amount) -- a legal action for player `idx` to act.
 
-    Returns a dict: action 'bet'|'check', kind 'value'|'thin'|'bluff'|'give-up',
-    size (chips), equity.
+    `amount` is a 'raise to' total (only for bet/raise), else None.
     """
-    eq = advise(hole, board, num_opponents, iterations)["equity"]
-    fair = 1 / (num_opponents + 1)
+    p = game.players[idx]
+    hole = [card_to_str(c) for c in p.hole]
+    board = [card_to_str(c) for c in game.board]
+    opponents_in = max(1, len(game.in_hand_indices()) - 1)
 
-    if eq >= fair * 1.4:                       # clear favorite -> value bet
-        return _bet("value", round(pot * VALUE_SIZE), eq)
-    if eq >= fair:                             # decent -> bet thin sometimes
-        if rng.random() < 0.5:
-            return _bet("thin", round(pot * THIN_SIZE), eq)
-        return _check("thin", eq)
-    if board and rng.random() < BLUFF_FREQ:    # weak -> occasional bluff
-        return _bet("bluff", round(pot * BLUFF_SIZE), eq)
-    return _check("give-up", eq)               # weak -> give up
+    eq = advise(hole, board, opponents_in, iterations)["equity"]
+    fair = 1.0 / (opponents_in + 1)
+    outs, _ = coach.count_outs(hole, board)
+    strong_draw = outs >= 8
+
+    la = game.legal_actions(idx)
+    pot = game.pot()
+    to_call = la["call"]
+
+    # ---- no bet to us: check or bet ------------------------------------
+    if to_call == 0:
+        if eq >= fair * 1.5:
+            return _aggress(game, idx, la, pot, VALUE_SIZE, rng)
+        if eq >= fair and rng.random() < 0.5:
+            return _aggress(game, idx, la, pot, THIN_SIZE, rng)
+        if board and strong_draw and rng.random() < SEMI_BLUFF_FREQ:
+            return _aggress(game, idx, la, pot, BLUFF_SIZE, rng)
+        if board and eq < fair * 0.6 and rng.random() < BLUFF_FREQ:
+            return _aggress(game, idx, la, pot, BLUFF_SIZE, rng)
+        return ("check", None)
+
+    # ---- facing a bet: fold / call / raise -----------------------------
+    required = to_call / (pot + to_call)
+
+    # premium: raise for value
+    if eq >= max(required * 1.7, 0.62) and rng.random() < VALUE_RAISE_FREQ:
+        return _aggress(game, idx, la, pot, RAISE_SIZE, rng)
+
+    # priced in: call
+    if eq >= required:
+        return ("call", None)
+
+    # strong draw: semi-bluff raise sometimes, else call if close (implied odds)
+    if strong_draw:
+        if rng.random() < SEMI_BLUFF_FREQ:
+            return _aggress(game, idx, la, pot, BLUFF_SIZE, rng)
+        if eq >= required * 0.7:            # close enough with chips behind
+            return ("call", None)
+
+    # otherwise it's a fold
+    return ("fold", None)
 
 
-def table_action(opp_holes, board, num_opponents, pot, iterations=300,
-                 rng=_random):
-    """Resolve a betting round: the strongest bettor is what the hero faces.
+def _aggress(game, idx, la, pot, frac, rng):
+    """Build a legal bet/raise of about `frac` of the pot, or fall back."""
+    if not la["can_raise"]:
+        # can't raise (e.g. too short) -- call if facing a bet, else check
+        return ("call", None) if la["can_call"] else ("check", None)
 
-    opp_holes: list of [card_str, card_str] for each opponent.
-    Returns (aggressor_dict_or_None, all_actions). The aggressor dict carries
-    a "seat" index (0-based).
-    """
-    actions = []
-    for seat, hole in enumerate(opp_holes):
-        a = decide(hole, board, num_opponents, pot, iterations, rng)
-        a["seat"] = seat
-        actions.append(a)
-
-    bettors = [a for a in actions if a["action"] == "bet"]
-    if not bettors:
-        return None, actions
-    aggressor = max(bettors, key=lambda a: a["equity"])
-    return aggressor, actions
-
-
-def _bet(kind, size, eq):
-    return {"action": "bet", "kind": kind, "size": max(20, size), "equity": eq}
-
-
-def _check(kind, eq):
-    return {"action": "check", "kind": kind, "size": 0, "equity": eq}
+    target = game.current_bet + round(pot * frac)
+    if game.current_bet == 0:
+        target = round(pot * frac)
+        action = "bet"
+    else:
+        action = "raise"
+    target = max(la["min_to"], min(target, la["max_to"]))
+    return (action, target)
