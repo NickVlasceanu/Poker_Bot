@@ -7,18 +7,15 @@ Run:  python gui.py
 """
 
 import queue
-import random
 import threading
 import tkinter as tk
 from tkinter import font as tkfont
 
 import coach
+import opponent
 from utils import (
     advise, deal_hand, showdown_winner, hand_class, card_to_str,
 )
-
-# Opponent bet size each street, as a fraction of the pot (drives pot odds).
-BET_SIZES = [0.33, 0.5, 0.75]
 
 # --- palette ---------------------------------------------------------------
 FELT = "#0b6623"
@@ -117,26 +114,23 @@ class PokerTable:
         self.num_opponents = self.opp_var.get()
         self.hero, self.opponents, self.full_board = deal_hand(self.num_opponents)
         self.hero_str = [card_to_str(c) for c in self.hero]
+        self.opp_str = [[card_to_str(c) for c in opp] for opp in self.opponents]
         self.board_str = [card_to_str(c) for c in self.full_board]
         self.street_idx = 0
         self.pot = 20 * (self.num_opponents + 1)  # antes
         self.to_call = 0                          # pre-flop: no bet faced
+        self.bettor_seat = None
         self.revealed = False
         self.next_btn.config(text="Next Street ▶", state="normal")
-        self.render()
-        self.update_equity()
+        self.start_street()
 
     def next_street(self):
         if self.street_idx < len(STREETS) - 1:
             self.pot += self.to_call            # you call the bet you faced
             self.street_idx += 1
-            # an opponent bets into the new street
-            self.to_call = max(20, round(self.pot * random.choice(BET_SIZES)))
-            self.pot += self.to_call
             if self.street_idx == len(STREETS) - 1:
                 self.next_btn.config(text="Showdown ♠")
-            self.render()
-            self.update_equity()
+            self.start_street()
         else:
             self.showdown()
 
@@ -164,32 +158,66 @@ class PokerTable:
         self.set_coach(verdict)
         self.render(banner=(msg, color))
 
-    # -- equity (off the UI thread so the window stays responsive) ----------
-    def update_equity(self):
-        n = STREETS[self.street_idx][1]
-        shown = self.board_str[:n]
+    # -- street worker (off the UI thread so the window stays responsive) ----
+    def start_street(self):
+        """Run opponent betting + hero equity for the new street in a thread.
+
+        Both need Monte-Carlo sims, so we do them off the UI thread and hand the
+        finished result back through the queue. While it runs, the bet is shown
+        as pending and Next is disabled so the pot accounting can't race.
+        """
+        self.to_call = None          # pending -> render shows "acting"
+        self.bettor_seat = None
+        self.next_btn.config(state="disabled")
+        self.render()
         self.canvas.itemconfigure("equity_text", text="Calculating equity...")
-        self.set_coach("Calculating equity and pot odds...")
+        self.set_coach("Opponents are acting; calculating equity and pot odds...")
 
         self._equity_token += 1
         token = self._equity_token
+        n = STREETS[self.street_idx][1]
+        shown = self.board_str[:n]
+        pot = self.pot
+        is_postflop = self.street_idx > 0
 
         def work():
             eq = advise(self.hero_str, shown, self.num_opponents, iterations=600)
-            self._equity_q.put((token, eq))
+            to_call, seat = 0, None
+            if is_postflop:
+                aggressor, _ = opponent.table_action(
+                    self.opp_str, shown, self.num_opponents, pot, iterations=300)
+                if aggressor:
+                    to_call, seat = aggressor["size"], aggressor["seat"]
+            pot_after = pot + to_call
+            text = coach.coach(eq, to_call, pot_after, shown,
+                               self.hero_str, self.num_opponents)
+            self._equity_q.put((token, {
+                "eq": eq, "to_call": to_call, "seat": seat,
+                "pot": pot_after, "coach": text,
+            }))
 
         threading.Thread(target=work, daemon=True).start()
 
     def _poll_equity(self):
-        """Main-thread drain of finished equity calcs; reschedules itself."""
+        """Main-thread drain of finished street calcs; reschedules itself."""
         try:
             while True:
-                token, eq = self._equity_q.get_nowait()
+                token, res = self._equity_q.get_nowait()
                 if token == self._equity_token:  # newest request only
-                    self.draw_equity(eq)
+                    self._apply_street(res)
         except queue.Empty:
             pass
         self.root.after(80, self._poll_equity)
+
+    def _apply_street(self, res):
+        """Land a finished street: set pot/bet, redraw, fill the coach panel."""
+        self.to_call = res["to_call"]
+        self.bettor_seat = res["seat"]
+        self.pot = res["pot"]
+        self.next_btn.config(state="normal")
+        self.render()
+        self.draw_equity(res["eq"])
+        self.set_coach(res["coach"])
 
     # -- drawing -----------------------------------------------------------
     def _card(self, x, y, card_str=None, face_up=True):
@@ -244,10 +272,20 @@ class PokerTable:
                                 font=self.big_font)
         self.canvas.create_text(820, 22, text=f"Pot: {self.pot}", fill=GOLD,
                                 font=self.label_font)
-        if self.to_call and not self.revealed:
-            self.canvas.create_text(820, 42,
-                                    text=f"To call: {self.to_call}", fill=RED_BAR,
-                                    font=self.label_font)
+        if not self.revealed:
+            if self.to_call is None:
+                self.canvas.create_text(820, 42, text="opponents acting…",
+                                        fill=TEXT_LIGHT, font=self.label_font)
+            elif self.to_call:
+                who = (f"Seat {self.bettor_seat + 1}"
+                       if self.bettor_seat is not None else "Opponent")
+                self.canvas.create_text(820, 42,
+                                        text=f"{who} bets {self.to_call}  "
+                                             f"(to call {self.to_call})",
+                                        fill=RED_BAR, font=self.label_font)
+            else:
+                self.canvas.create_text(820, 42, text="checked to you",
+                                        fill=TEXT_LIGHT, font=self.label_font)
 
         # opponents
         self.canvas.create_text(120, 60, text=f"Opponents ({self.num_opponents})",
@@ -301,12 +339,6 @@ class PokerTable:
             "rec_text",
             text=f"➔ {eq['recommendation']}   "
                  f"(fair share {eq['fair_share']:.0%})")
-
-        # full teaching breakdown in the side panel
-        n = STREETS[self.street_idx][1]
-        self.set_coach(coach.coach(eq, self.to_call, self.pot,
-                                   self.board_str[:n], self.hero_str,
-                                   self.num_opponents))
 
 
 def main():

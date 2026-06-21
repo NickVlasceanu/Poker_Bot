@@ -9,17 +9,13 @@ Run:  python main.py            (simulate a full hand)
 
 import argparse
 import os
-import random
 import sys
 import time
 
 import board
 import coach
+import opponent
 from utils import advise, deal_hand, showdown_winner, hand_class, card_to_str
-
-# How big the opponent bets each street, as a fraction of the current pot.
-# A half-pot bet asks for 25% equity, a pot-sized bet asks for 33%, etc.
-BET_SIZES = [0.33, 0.5, 0.75]
 
 
 def _init_terminal():
@@ -53,11 +49,17 @@ def play_hand(num_opponents=2, pause=1.6):
     for street, n in STREETS:
         shown_board = board_str[:n]
 
-        # An opponent bets into us (except pre-flop, which is just the antes).
+        # Opponents act on their own cards (except pre-flop = just the antes).
         to_call = 0
+        bettor_seat = None
         if street != "Pre-flop":
-            to_call = max(20, round(pot * random.choice(BET_SIZES)))
-            pot += to_call  # their chips go in before we decide
+            opp_holes = [[card_to_str(c) for c in opp] for opp in opponents]
+            aggressor, _ = opponent.table_action(
+                opp_holes, shown_board, num_opponents, pot)
+            if aggressor:
+                to_call = aggressor["size"]
+                bettor_seat = aggressor["seat"]
+                pot += to_call  # their chips go in before we decide
 
         eq = advise(hero_str, shown_board, num_opponents)
 
@@ -69,6 +71,7 @@ def play_hand(num_opponents=2, pause=1.6):
             "opponents": num_opponents,
             "pot": pot,
             "to_call": to_call,
+            "bettor_seat": bettor_seat,
             "equity": eq,
         }))
         print()

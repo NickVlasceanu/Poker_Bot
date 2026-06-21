@@ -148,6 +148,18 @@ def coach(eq, to_call, pot, board, hole, num_opponents):
         sign = "makes" if ev >= 0 else "loses"
         lines.append(f"  EV(call) ≈ {ev:+.0f} chips. You risk {to_call} to win "
                      f"{pot}; at {e:.0%} that {sign} money over time.")
+
+        section("WHAT THE BET REPRESENTS")
+        pot_before = pot - to_call
+        frac = to_call / pot_before if pot_before > 0 else 1.0
+        lines.append(f"  That's a {frac:.0%}-pot bet. A balanced bettor is "
+                     f"value-heavy here: only about {required:.0%} of these bets "
+                     "are bluffs, the rest are real hands.")
+        lines.append(f"  Note {required:.0%} is also your break-even price — not a "
+                     "coincidence. A balanced opponent bluffs JUST enough to make "
+                     "your call a coin flip.")
+        lines.append("  So the read decides it: call if you think THIS player "
+                     "bluffs more than that, fold if less.")
     else:
         section("NO BET — it's checked to you")
         lines.append("  Nothing to call, so there are no pot odds to beat. The "
